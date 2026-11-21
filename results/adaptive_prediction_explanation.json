@@ -1,0 +1,53 @@
+{
+  "sample_features": [
+    7.3,
+    2.9,
+    6.3,
+    1.8
+  ],
+  "true_class": "virginica",
+  "explanation": {
+    "predicted_class": 2,
+    "predicted_class_name": "virginica",
+    "path": [
+      {
+        "step": 1,
+        "node_type": "univariate",
+        "feature_j": "petal length (cm)",
+        "feature_k": null,
+        "w1": 1.0,
+        "w2": 0.0,
+        "b": -2.45,
+        "value_j": 6.3,
+        "value_k": null,
+        "rule": "(1.000000 * petal length (cm)) + (-2.450000) < 0",
+        "calculation": "(1.000000 * 6.300000) + (-2.450000) = 3.850000",
+        "score": 3.8499999999999996,
+        "direction": "right",
+        "search_stage": "univariate",
+        "angle_degrees": null
+      },
+      {
+        "step": 2,
+        "node_type": "bivariate",
+        "feature_j": "sepal length (cm)",
+        "feature_k": "petal width (cm)",
+        "w1": 0.17364817766693041,
+        "w2": 0.984807753012208,
+        "b": -2.811568743839148,
+        "value_j": 7.3,
+        "value_k": 1.8,
+        "rule": "(0.173648 * sepal length (cm)) + (0.984808 * petal width (cm)) + (-2.811569) < 0",
+        "calculation": "(0.173648 * 7.300000) + (0.984808 * 1.800000) + (-2.811569) = 0.228717",
+        "score": 0.22871690855141846,
+        "direction": "right",
+        "search_stage": "coarse",
+        "angle_degrees": 80.0
+      }
+    ],
+    "leaf_samples": 33,
+    "leaf_class_counts": {
+      "virginica": 33
+    }
+  }
+}

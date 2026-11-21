@@ -48,10 +48,10 @@ WHAT WE SIMPLIFY / LEAVE OUT (see Step 3 of the plan) -- OUT OF SCOPE
   between zero/one/two features based on a global penalty. Instead,
   we use a simple, explicit, LOCAL fallback rule (see
   `_choose_best_split`) to decide bivariate vs univariate per node.
-- We use GINI IMPURITY REDUCTION to score candidate splits, not the
-  paper's exact 0/1-loss objective (Eq. 3). Gini is the standard
-  CART-family criterion and is much cheaper to compute at every
-  candidate threshold.
+- We use GINI IMPURITY REDUCTION to score local candidate splits,
+  corresponding to the bivariate CART-style approach. We do not
+  reproduce the 0/1-loss optimization used for the TAO formulation.
+  Gini is the standard CART-family criterion.
 - We do not implement a regularization path over lambda, nor
   cost-complexity pruning. We rely on simple stopping conditions
   instead (max depth, min samples, purity, minimum impurity decrease).
@@ -59,7 +59,9 @@ WHAT WE SIMPLIFY / LEAVE OUT (see Step 3 of the plan) -- OUT OF SCOPE
   Iris only has 4 features -> 6 pairs total) rather than a general
   large-D scheme.
 
-
+These choices are simplifications/engineering decisions for a
+one-week student project, not claims about what the original paper
+does at full scale.
 """
 
 import itertools
@@ -110,6 +112,8 @@ class DecisionNode:
 
         self.left = None   # child DecisionNode or LeafNode
         self.right = None  # child DecisionNode or LeafNode
+        self.angle_degrees = None
+        self.search_stage = None
 
     def route(self, x):
         """
@@ -249,7 +253,11 @@ def _best_threshold_for_projection(proj, y):
     return best_b, best_gain
 
 
-def search_bivariate_split(X, y, feature_pairs, n_orientations):
+def search_bivariate_split(X, y, feature_pairs, n_orientations,
+                           adaptive_refinement=False,
+                           refinement_top_k=2,
+                           refinement_window_degrees=8.0,
+                           refinement_step_degrees=2.0):
     """
     THIS FUNCTION IS THE HEART OF THE BIVARIATE ALGORITHM.
 
@@ -272,10 +280,15 @@ def search_bivariate_split(X, y, feature_pairs, n_orientations):
     orientations is used instead of solving the (expensive, exact)
     optimal linear separator problem.
 
-    SIMPLIFICATION: the paper uses the exact 0/1 loss as the
-    objective (Eq. 3); we use Gini impurity reduction, which is the
-    standard CART-family alternative and is documented as a
-    simplification in Step 3 of the project plan.
+    EXTENSION: when adaptive_refinement=True, the same fixed-grid
+    candidates are tested first; for each feature pair, the top-K
+    coarse angles are refined in a local angular neighborhood.
+    This is a project-level enhancement, not a claim of a novel
+    research algorithm or a reproduction of TAO.
+
+    The implementation is a simplified bivariate CART-style local
+    Gini search, not the paper's globally optimized TAO approach.
+    In particular, it does not implement the TAO 0/1-loss objective.
 
     Parameters
     ----------
@@ -292,35 +305,61 @@ def search_bivariate_split(X, y, feature_pairs, n_orientations):
         Dictionary with keys: feat_j, feat_k, w1, w2, b, gain.
         None if no valid split was found at all (e.g. too few samples).
     """
-    angles = np.linspace(0, np.pi, n_orientations, endpoint=False)
-
+    # Fixed-angle search is retained exactly as the original baseline.
+    # Adaptive mode only ADDS searches around the best coarse angles.
+    angles = np.linspace(0.0, np.pi, n_orientations, endpoint=False)
     best_split = None
     best_gain = -np.inf
 
-    for (feat_j, feat_k) in feature_pairs:
-        x_j = X[:, feat_j]
-        x_k = X[:, feat_k]
+    for feat_j, feat_k in feature_pairs:
+        x_j, x_k = X[:, feat_j], X[:, feat_k]
+        coarse_candidates = []
 
-        for angle in angles:
-            w1 = np.cos(angle)
-            w2 = np.sin(angle)
-
+        def evaluate_angle(angle, stage):
+            nonlocal best_split, best_gain
+            w1, w2 = float(np.cos(angle)), float(np.sin(angle))
             proj = w1 * x_j + w2 * x_k
-
             b, gain = _best_threshold_for_projection(proj, y)
             if b is None:
-                continue
-
+                return
+            if stage == "coarse":
+                coarse_candidates.append((float(gain), float(angle)))
+            # Strict improvement makes the old fixed-grid result unchanged
+            # when adaptive searches do not improve Gini gain.
             if gain > best_gain:
                 best_gain = gain
                 best_split = {
-                    "feat_j": feat_j,
-                    "feat_k": feat_k,
-                    "w1": w1,
-                    "w2": w2,
-                    "b": b,
-                    "gain": gain,
+                    "feat_j": feat_j, "feat_k": feat_k,
+                    "w1": w1, "w2": w2, "b": float(b),
+                    "gain": float(gain),
+                    "angle_degrees": float(np.degrees(angle)),
+                    "search_stage": stage,
                 }
+
+        for angle in angles:
+            evaluate_angle(float(angle), "coarse")
+
+        if not adaptive_refinement or not coarse_candidates:
+            continue
+
+        # Select best coarse orientations for THIS feature pair, not
+        # just one global pair. Evaluate nearby angles at finer steps.
+        # Every angle is normalized to [0, pi); opposite directions
+        # define the same partition (with left/right exchanged).
+        top_angles = sorted(coarse_candidates, key=lambda item: -item[0])
+        top_angles = [angle for gain, angle in top_angles[:refinement_top_k]]
+        offsets = np.arange(-refinement_window_degrees,
+                            refinement_window_degrees + 1e-9,
+                            refinement_step_degrees)
+        seen = {round(float(a), 10) for a in angles}
+        for center in top_angles:
+            for offset_deg in offsets:
+                angle = float((center + np.deg2rad(offset_deg)) % np.pi)
+                key = round(angle, 10)
+                if key in seen:
+                    continue
+                seen.add(key)
+                evaluate_angle(angle, "refined")
 
     return best_split
 
@@ -375,7 +414,10 @@ def search_univariate_split(X, y, n_features):
 # =======================================================================
 # 5. Choosing between bivariate and univariate at a node
 # =======================================================================
-def _choose_best_split(X, y, feature_pairs, n_orientations, n_features):
+def _choose_best_split(X, y, feature_pairs, n_orientations, n_features,
+                       adaptive_refinement=False, refinement_top_k=2,
+                       refinement_window_degrees=8.0,
+                       refinement_step_degrees=2.0):
     """
     ENGINEERING-LEVEL DECISION RULE (explicitly NOT from the paper's
     TAO node-type selection formula, which uses lambda/C
@@ -397,7 +439,13 @@ def _choose_best_split(X, y, feature_pairs, n_orientations, n_features):
     chosen_split : dict (with an added "node_type" key), or None if
                    neither search found a usable split.
     """
-    biv_split = search_bivariate_split(X, y, feature_pairs, n_orientations)
+    biv_split = search_bivariate_split(
+        X, y, feature_pairs, n_orientations,
+        adaptive_refinement=adaptive_refinement,
+        refinement_top_k=refinement_top_k,
+        refinement_window_degrees=refinement_window_degrees,
+        refinement_step_degrees=refinement_step_degrees,
+    )
     uni_split = search_univariate_split(X, y, n_features)
 
     biv_gain = biv_split["gain"] if biv_split is not None else -np.inf
@@ -447,6 +495,15 @@ class BivariateDecisionTree:
         Number of candidate line orientations (H in the paper) used
         by the bivariate split search, sampled uniformly in [0, 180)
         degrees. Kept small deliberately for speed (see Step 3).
+    adaptive_refinement : bool, default False
+        When True, search finer orientations around promising coarse
+        directions; False preserves the previous fixed-angle behavior.
+    refinement_top_k : int, default 2
+        Number of promising coarse orientations per feature pair.
+    refinement_window_degrees : float, default 8
+        Half-width of each local angle search neighborhood.
+    refinement_step_degrees : float, default 2
+        Step size used in the local refinement.
     random_seed : int
         Stored for reproducibility / consistency with the rest of the
         project, even though this implementation is deterministic
@@ -455,7 +512,21 @@ class BivariateDecisionTree:
 
     def __init__(self, max_depth=4, min_samples_split=5,
                  min_impurity_decrease=1e-7, n_orientations=18,
-                 random_seed=42):
+                 random_seed=42, adaptive_refinement=False,
+                 refinement_top_k=2, refinement_window_degrees=8.0,
+                 refinement_step_degrees=2.0):
+        if not isinstance(n_orientations, (int, np.integer)) or n_orientations < 1:
+            raise ValueError("n_orientations must be a positive integer")
+        if not isinstance(refinement_top_k, (int, np.integer)) or refinement_top_k < 1:
+            raise ValueError("refinement_top_k must be a positive integer")
+        if refinement_window_degrees <= 0 or refinement_window_degrees >= 90:
+            raise ValueError("refinement_window_degrees must be between 0 and 90")
+        if refinement_step_degrees <= 0:
+            raise ValueError("refinement_step_degrees must be positive")
+        self.adaptive_refinement = bool(adaptive_refinement)
+        self.refinement_top_k = int(refinement_top_k)
+        self.refinement_window_degrees = float(refinement_window_degrees)
+        self.refinement_step_degrees = float(refinement_step_degrees)
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_impurity_decrease = min_impurity_decrease
@@ -526,7 +597,11 @@ class BivariateDecisionTree:
 
         # --- Search for the best split at this node ---
         split = _choose_best_split(
-            X, y, self.feature_pairs_, self.n_orientations, self.n_features_
+            X, y, self.feature_pairs_, self.n_orientations, self.n_features_,
+            adaptive_refinement=self.adaptive_refinement,
+            refinement_top_k=self.refinement_top_k,
+            refinement_window_degrees=self.refinement_window_degrees,
+            refinement_step_degrees=self.refinement_step_degrees,
         )
 
         # --- Stopping condition 4: no usable split found, or the
@@ -545,6 +620,10 @@ class BivariateDecisionTree:
             impurity_gain=split["gain"],
             n_samples=n_samples,
         )
+
+        # Additional metadata only: routing rule remains unchanged.
+        node.angle_degrees = split.get("angle_degrees")
+        node.search_stage = split.get("search_stage", "univariate")
 
         # --- Partition the data using this node's routing rule ---
         left_mask = np.array([node.route(x) == "left" for x in X])
@@ -606,6 +685,97 @@ class BivariateDecisionTree:
         return self._predict_one(x, child)
 
     # -------------------------------------------------------------
+    # NEW FEATURE: explain the actual path of ONE prediction.
+    # -------------------------------------------------------------
+    def explain_prediction(self, x, feature_names=None, class_names=None):
+        """Return inspectable details of every decision made for one sample.
+
+        The returned dictionary contains the final prediction, a list of
+        decision steps and the reached leaf's training-class counts.
+        It does NOT alter or retrain the fitted tree.
+        """
+        if self.root is None:
+            raise RuntimeError("Call fit() before explain_prediction().")
+        x = np.asarray(x, dtype=float)
+        if x.ndim != 1 or len(x) != self.n_features_:
+            raise ValueError(f"Expected one 1D sample with {self.n_features_} features")
+        if not np.all(np.isfinite(x)):
+            raise ValueError("Input sample must contain finite numeric values")
+        if feature_names is not None and len(feature_names) != self.n_features_:
+            raise ValueError("feature_names must match the number of features")
+
+        def feature_name(index):
+            return str(feature_names[index]) if feature_names is not None else f"x{index}"
+
+        def class_name(value):
+            key = value.item() if isinstance(value, np.generic) else value
+            if class_names is None:
+                return str(key)
+            if isinstance(class_names, dict):
+                return str(class_names.get(key, key))
+            return str(class_names[int(key)])
+
+        steps = []
+        node = self.root
+        while not node.is_leaf():
+            v1 = float(x[node.feat_j]); v2 = float(x[node.feat_k])
+            score = float(node.w1 * v1 + node.w2 * v2 + node.b)
+            direction = "left" if score < 0 else "right"
+            second = (f" + ({node.w2:.6f} * {feature_name(node.feat_k)})"
+                      if node.node_type == "bivariate" else "")
+            rule = (f"({node.w1:.6f} * {feature_name(node.feat_j)})"
+                    f"{second} + ({node.b:.6f}) < 0")
+            numeric_second = (f" + ({node.w2:.6f} * {v2:.6f})"
+                              if node.node_type == "bivariate" else "")
+            calculation = (f"({node.w1:.6f} * {v1:.6f})"
+                           f"{numeric_second} + ({node.b:.6f}) = {score:.6f}")
+            steps.append({
+                "step": len(steps) + 1,
+                "node_type": node.node_type,
+                "feature_j": feature_name(node.feat_j),
+                "feature_k": (feature_name(node.feat_k)
+                              if node.node_type == "bivariate" else None),
+                "w1": float(node.w1),
+                "w2": float(node.w2),
+                "b": float(node.b),
+                "value_j": v1,
+                "value_k": v2 if node.node_type == "bivariate" else None,
+                "rule": rule,
+                "calculation": calculation,
+                "score": score,
+                "direction": direction,
+                "search_stage": node.search_stage,
+                "angle_degrees": node.angle_degrees,
+            })
+            node = node.left if direction == "left" else node.right
+
+        predicted = node.predicted_class
+        if isinstance(predicted, np.generic):
+            predicted = predicted.item()
+        return {
+            "predicted_class": predicted,
+            "predicted_class_name": class_name(predicted),
+            "path": steps,
+            "leaf_samples": int(node.n_samples),
+            "leaf_class_counts": {
+                str(class_name(k)): int(v) for k, v in node.class_counts.items()
+            },
+        }
+
+    def print_prediction_explanation(self, x, feature_names=None, class_names=None):
+        """Print a readable explanation and also return the structured result."""
+        explanation = self.explain_prediction(x, feature_names, class_names)
+        print("\nPrediction explanation")
+        print("-" * 60)
+        for step in explanation["path"]:
+            print(f"Step {step['step']} [{step['node_type']}]: {step['rule']}")
+            print(f"  Substitute values: {step['calculation']}")
+            print(f"  Branch: {step['direction'].upper()}")
+        print(f"Prediction: {explanation['predicted_class_name']}")
+        print(f"Leaf class counts: {explanation['leaf_class_counts']}")
+        return explanation
+
+    # -------------------------------------------------------------
     # Structural helper methods (for evaluation + viva inspection)
     # -------------------------------------------------------------
     def get_depth(self):
@@ -662,6 +832,8 @@ class BivariateDecisionTree:
             "b": node.b,
             "impurity_gain": node.impurity_gain,
             "n_samples": node.n_samples,
+            "angle_degrees": node.angle_degrees,
+            "search_stage": node.search_stage,
         })
         self._collect_decision_nodes(node.left, nodes_info)
         self._collect_decision_nodes(node.right, nodes_info)
