@@ -225,3 +225,36 @@ Kairgeldin, R., & Carreira-Perpiñán, M. Á. (2024). *Bivariate Decision Trees:
 ---
 
 **Academic integrity note:** This repository contains an independent, simplified student reimplementation created for coursework. It is not affiliated with or endorsed by the original authors, and its results do not represent the performance of the methods described in the original paper.
+
+## Additional Features Implemented
+
+This project extends the simplified Bivariate Decision Tree
+implementation with two additional features.
+
+### 1. Adaptive Angle Refinement
+- Starts with 18 fixed candidate orientations.
+- Identifies promising splitting angles.
+- Searches nearby angles using finer increments.
+- Attempts to improve Gini impurity reduction.
+
+### 2. Explainable Predictions
+- Displays the decision path for individual predictions.
+- Shows the mathematical rule evaluated at each node.
+- Calculates the decision score.
+- Explains whether the sample follows the LEFT or RIGHT branch.
+- Displays the final predicted class.
+
+### Experimental Results
+- Iris test accuracy: 95.56% for both fixed and adaptive models.
+- Synthetic dataset accuracy:
+  - Fixed-angle: 98.15%
+  - Adaptive-angle: 100%
+- All five automated tests passed.
+
+### Run the Enhanced Implementation
+
+python main.py --enhanced
+
+### Run Automated Tests
+
+python -m unittest discover -s tests -v
